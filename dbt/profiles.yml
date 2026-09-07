@@ -1,0 +1,7 @@
+bcb_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('BCB_DUCKDB_PATH', 'bcb.duckdb') }}"
+      threads: 4

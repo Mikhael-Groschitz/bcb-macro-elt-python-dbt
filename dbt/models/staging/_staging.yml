@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_sgs_observacao
+    description: Uma linha por observação de série do SGS, deduplicada por (codigo_serie, data_observacao) mantendo a carga mais recente.
+    columns:
+      - name: codigo_serie
+        tests: [not_null]
+      - name: data_observacao
+        tests: [not_null]
+      - name: valor
+        tests: [not_null]
+      - name: chave_natural
+        tests: [not_null, unique]
+
+  - name: stg_focus_expectativa
+    description: Uma linha por expectativa coletada no Focus, deduplicada por chave natural mantendo a carga mais recente.
+    columns:
+      - name: indicador
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["IPCA", "Selic", "Câmbio", "PIB Total"]
+      - name: ano_referencia
+        tests: [not_null]
+      - name: data_coleta
+        tests: [not_null]
+      - name: base_calculo
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: chave_natural
+        tests: [not_null, unique]

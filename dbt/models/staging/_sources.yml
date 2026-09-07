@@ -1,0 +1,32 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: sgs_observacao
+        loaded_at_field: _carregado_em
+        freshness:
+          warn_after: { count: 14, period: day }
+          error_after: { count: 60, period: day }
+        columns:
+          - name: codigo_serie
+            tests: [not_null]
+          - name: data_referencia
+            tests: [not_null]
+          - name: valor
+            tests: [not_null]
+      - name: focus_expectativa
+        loaded_at_field: _carregado_em
+        freshness:
+          warn_after: { count: 14, period: day }
+          error_after: { count: 60, period: day }
+        columns:
+          - name: indicador
+            tests: [not_null]
+          - name: data_referencia
+            tests: [not_null]
+          - name: data_coleta
+            tests: [not_null]
+          - name: base_calculo
+            tests: [not_null]

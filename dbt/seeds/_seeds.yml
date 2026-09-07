@@ -1,0 +1,18 @@
+version: 2
+
+seeds:
+  - name: de_para_indicador
+    description: Mapeia o Indicador do Focus para o código de série SGS realizado correspondente, com a fonte de confirmação de cada código.
+    columns:
+      - name: indicador_focus
+        tests: [not_null, unique]
+      - name: codigo_serie_sgs
+        tests: [not_null]
+
+  - name: dim_serie
+    description: Nome, unidade e periodicidade de cada série SGS carregada.
+    columns:
+      - name: codigo_serie
+        tests: [not_null, unique]
+      - name: nome
+        tests: [not_null]

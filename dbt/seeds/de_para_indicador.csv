@@ -1,0 +1,5 @@
+indicador_focus,codigo_serie_sgs,fonte_confirmacao
+IPCA,433,"Confirmado por chamada real a api.bcb.gov.br/dados/serie/bcdata.sgs.433 (valores mensais na faixa 0.07-0.88%, plausível para IPCA) e por busca web cruzada (SGS 433 = IPCA, variação mensal)."
+Selic,432,"Confirmado por chamada real a api.bcb.gov.br/dados/serie/bcdata.sgs.432 (valor constante entre reuniões do Copom, ex. 14.00% por dias seguidos - comportamento de meta, não de taxa efetiva diária) e por busca web (SGS 432 = Taxa de juros - Meta Selic definida pelo Copom)."
+Câmbio,1,"Confirmado na Fase 1 por chamada real a api.bcb.gov.br/dados/serie/bcdata.sgs.1 (dólar americano - venda, diário)."
+PIB Total,7326,"Confirmado por chamada real a api.bcb.gov.br/dados/serie/bcdata.sgs.7326 (valores anuais na faixa 2-3.5%, plausível para variação real do PIB) e por fonte externa (quantilica.com/hedgehog/series/7326: 'Produto Interno Bruto - Taxa de variação real no ano')."

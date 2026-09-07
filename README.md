@@ -30,14 +30,36 @@ antes de passar para a próxima. Por enquanto:
   determinístico sobre `ExpectativasMercadoAnuais`, carga incremental por
   data de coleta, upsert idempotente em `raw.focus_expectativa`, 14 testes
   novos
-- [ ] **Fase 4 — dbt**: staging, snapshot SCD2 sobre as revisões do SGS,
-  marts de erro de projeção
+- [x] **Fase 4 — dbt**: staging, snapshot SCD2 sobre as revisões do SGS,
+  seeds de mapeamento indicador↔série, normalização de unidades, marts de
+  erro de projeção, 69 testes dbt (genéricos + 3 singulares)
 - [ ] **Fase 5 — CI e apresentação**: GitHub Actions, CLI completa
-  (`ingest`/`status`/`reset`), README final com o achado analítico
+  (`ingest`/`status`/`reset`), README final consolidado
 
-O achado final — o cruzamento entre projeção e realizado — e uma leitura
-consolidada de trade-offs olhando o pipeline inteiro ficam para o fechamento,
-depois de "Decisões e trade-offs", quando as cinco fases estiverem prontas.
+O achado já está abaixo, em "O que os dados mostram" — uma leitura
+consolidada de trade-offs olhando o pipeline inteiro fica para o fechamento
+da Fase 5.
+
+## O que os dados mostram
+
+`mart_convergencia_focus` responde à pergunta central do projeto: o erro
+mediano do Focus cai conforme a data de referência se aproxima, para os
+quatro indicadores, sem exceção:
+
+| Indicador | ≤30 dias | 31-90 dias | 91-180 dias | 181-365 dias | 366+ dias |
+|---|---|---|---|---|---|
+| Selic (meta) | 0,00 | 0,00 | 0,50 | 1,50 | 3,25 |
+| Câmbio | 0,05 | 0,09 | 0,13 | 0,34 | 0,67 |
+| IPCA | 0,10 | 0,38 | 0,55 | 0,97 | 1,40 |
+| PIB Total | 0,41 | 0,38 | 0,43 | 0,99 | 1,59 |
+
+(erro absoluto mediano, mesma unidade do indicador - pontos percentuais para
+os quatro). Selic é o caso mais nítido: erro praticamente zero a até 90 dias
+da decisão do Copom (o mercado já sabe o que vem por aí) contra 3,25 pontos
+de erro mediano para projeções feitas mais de um ano antes. PIB Total é o
+único com uma pequena inversão entre as duas primeiras faixas (0,41 → 0,38) -
+com poucas centenas de observações por faixa, dá para ser ruído amostral, não
+uma quebra do padrão geral.
 
 ## Arquitetura
 
@@ -51,14 +73,18 @@ flowchart TD
     F --> G[marts<br/>fct_erro_projecao]
     G --> H[consultas/<br/>achado final]
 
-    style A fill:#e8e8e8,stroke:#888
-    style B fill:#fff3cd,stroke:#c9971f
-    style C fill:#fff3cd,stroke:#c9971f
+    style A fill:#d4edda,stroke:#2e7d32
+    style B fill:#d4edda,stroke:#2e7d32
+    style C fill:#d4edda,stroke:#2e7d32
+    style D fill:#d4edda,stroke:#2e7d32
+    style E fill:#d4edda,stroke:#2e7d32
+    style F fill:#d4edda,stroke:#2e7d32
     style G fill:#d4edda,stroke:#2e7d32
+    style H fill:#d4edda,stroke:#2e7d32
 ```
 
-Hoje as extrações do SGS e do Focus já gravam landing e `raw.*` (caixas
-cinza e amarelas). Falta todo o dbt (caixas verdes).
+O pipeline completo já roda de ponta a ponta, das duas APIs até os marts.
+Falta CI e a apresentação final (Fase 5).
 
 ## Versões fixadas
 
@@ -69,6 +95,8 @@ cinza e amarelas). Falta todo o dbt (caixas verdes).
 | structlog | `>=26.1,<27` | logging JSON com `contextvars` para bind de contexto entre camadas |
 | pyarrow | `>=25,<26` | monta as tabelas em memória para o bulk insert no DuckDB (ver "Decisões") |
 | duckdb | `>=1.5,<2` | `raw.sgs_observacao`, `raw.focus_expectativa`, `_controle.*` |
+| dbt-core | `>=1.12,<2` | staging, snapshot, intermediate e marts |
+| dbt-duckdb | `>=1.11,<2` | adapter dbt para o mesmo arquivo DuckDB da ingestão |
 | pytest / respx / ruff / mypy / pyarrow-stubs | ver `pyproject.toml` | dev only |
 
 Sem `pandas` — a ingestão usa `httpx` + `pydantic` + `pyarrow` + `duckdb`.
@@ -133,7 +161,11 @@ de Selic é por reunião do Copom, não por data calendário.
 (`Indicador`, `Media`, mas `numeroRespondentes`, `baseCalculo` minúsculos) em
 vez de normalizar tudo para `snake_case` com `Field(alias=...)` em cada campo
 — menos boilerplate, menos risco de erro de digitação no alias. Suprimido via
-`ruff` (regra `N815`) só no arquivo de contratos.
+`ruff` (regra `N815`) só no arquivo de contratos. Pela mesma razão de
+convenção — código, nomes e mensagens em português —, as exceções do projeto
+usam prefixo `Erro` em vez do sufixo `Error` esperado pelo inglês
+(`ErroSgs`, `ErroFocus`, `ErroClienteBcb`); a regra correspondente (`N818`)
+é ignorada no projeto inteiro.
 
 **Datas em formatos diferentes por API.** SGS usa `dd/MM/aaaa` (exige parser
 customizado); Focus usa ISO `aaaa-MM-dd` (Pydantic parseia nativo). É uma
@@ -228,6 +260,74 @@ uma página com zero itens encerra o laço. É mais uma requisição no pior
 caso, mas remove qualquer suposição sobre o servidor sempre preencher a
 página até o limite antes da última.
 
+**Códigos SGS do `de_para_indicador` confirmados por chamada real, um por
+um, sem chutar nenhum.** IPCA é a série 433 (variação mensal — confirmado
+pelos valores retornados, plausíveis para inflação mensal, e por fonte
+externa). PIB Total é a série 7326 ("PIB - taxa de variação real no ano",
+anual — confirmado por duas fontes externas independentes). Selic é a série
+432, **não a 11**: a 11 é a taxa Selic efetiva diária, mas o que o Focus
+projeta é a meta Selic definida pelo Copom (série 432, valor constante entre
+reuniões) — confirmado tanto pelo comportamento dos dados (432 fica igual
+por dias seguidos, 11 varia diariamente) quanto por fonte externa. Câmbio
+reaproveita a série 1 (dólar venda), já confirmada na Fase 1.
+
+**`baseCalculo = 0` escolhido para o grão dos marts, sem confirmação oficial
+do que ele significa.** O Focus devolve duas linhas por indicador/data/ano de
+referência, uma por `baseCalculo`. Não há documentação oficial do BCB (FAQ do
+Sistema Expectativas de Mercado, metadata OData, Swagger) que defina o que
+distingue 0 de 1 — só evidência indireta de que a base 0 consistentemente tem
+mais respondentes que a 1 nas amostras conferidas (ex. 148 vs. 95). A base 0
+foi escolhida por ter a amostra mais ampla: uma decisão por evidência
+observada, não por definição oficial confirmada.
+
+**Normalização de unidades no `int_sgs_realizado_anual`.** O Focus projeta
+sempre um valor anual, mas cada série SGS realizada chega numa granularidade
+diferente: IPCA (433) é variação **mensal**, acumulada via juros compostos
+até fechar o ano; Câmbio (1) e Meta Selic (432) são **diárias**, das quais se
+usa a última observação do ano (valor de fim de período, do jeito que o
+Focus também projeta); PIB Total (7326) já é anual, sem transformação. Um
+flag `ano_completo` marca anos sem os 12 meses (IPCA) ou sem observação em
+dezembro (Câmbio/Selic) — `fct_erro_projecao` só usa anos completos.
+
+**Chave natural computada em vez de `dbt_utils` para testes de unicidade
+composta.** Concatenar as colunas da chave num único campo `chave_natural`
+(em `stg_*` e nos marts) permite usar o teste genérico `unique` do dbt-core
+puro. Evita adicionar uma dependência de pacote externo (`dbt deps`) só para
+um teste de unicidade em múltiplas colunas.
+
+**Snapshot com `unique_key` na `chave_natural`, estratégia `check` sobre
+`valor`.** A cada rodada do snapshot, se o valor mudou para a mesma chave, a
+versão antiga é fechada (`dbt_valid_to` preenchido) e uma nova é aberta — é
+essa mecânica que transforma a revisão de uma série do SGS em SCD Tipo 2 (ver
+"Snapshot" abaixo para um caso real).
+
+**`profiles.yml` do dbt lê o mesmo `BCB_DUCKDB_PATH` do `bcb_ingest`.** dbt e
+a ingestão em Python apontam para o mesmo arquivo DuckDB por padrão — não há
+um passo de "exportar" dados de um lado para o outro, `dbt build` lê
+diretamente o que `bcb_ingest` gravou.
+
+## Snapshot (SCD Tipo 2)
+
+Nenhuma revisão real do BCB ocorreu no período de construção deste projeto
+— uma nova consulta à API horas depois de uma carga não mostrou mudança em
+nenhum valor recém-carregado (revisão de série publicada não é um evento
+diário). Para demonstrar que o mecanismo funciona mesmo assim, uma revisão
+foi simulada pelo próprio caminho de código de upsert
+(`armazenamento.upsert_observacoes`), sobrescrevendo o dólar venda de
+03/06/2024 de 5,2373 para 5,2400 sob um `_execucao_id` rotulado
+`SIMULACAO_REVISAO_DEMO_SCD2` — deixando claro que essa linha específica não
+veio do BCB. O snapshot antes e depois dessa simulação:
+
+| valor | dbt_valid_from | dbt_valid_to |
+|---|---|---|
+| 5,2373 | 2026-09-07 14:43:40 | 2026-09-07 14:48:50 |
+| 5,2400 | 2026-09-07 14:48:50 | *(nulo — vigente)* |
+
+A versão antiga fechou exatamente no instante em que a nova entrou, sem
+sobreposição (garantido pelo teste singular
+`assert_snapshot_sem_sobreposicao_vigencia`) — o mesmo mecanismo que vai
+capturar uma revisão de verdade quando o BCB publicar uma.
+
 ## Peculiaridades das APIs do BCB
 
 - **O erro de janela grande do SGS é HTTP 406, não 400/422**, e o corpo é um
@@ -299,6 +399,14 @@ base_calculo)`.
 horizonte, porque a carga incremental do Focus não tem data final: sempre
 busca "tudo que for mais novo que a última coleta conhecida".
 
+**Camadas do dbt** (schemas separados no mesmo `bcb.duckdb`): `staging`
+(`stg_sgs_observacao`, `stg_focus_expectativa` — views, deduplicadas por
+chave natural), `snapshots` (`snp_sgs_observacao` — SCD Tipo 2),
+`intermediate` (`int_focus_horizonte`, `int_sgs_realizado_anual` — views),
+`marts` (`fct_serie_observada`, `fct_expectativa`, `fct_erro_projecao`,
+`mart_convergencia_focus` — tables), `seeds` (`de_para_indicador`,
+`dim_serie`).
+
 ## Números
 
 61 testes automatizados, execução completa em cerca de 6,8s, sem chamada de
@@ -351,6 +459,24 @@ no Focus não encontra nada mais novo que a última coleta (1 página vazia,
 ambos os casos porque o upsert atualiza linhas existentes em vez de
 duplicá-las.
 
+Além das três séries diárias, mais três séries do SGS foram carregadas para
+ter realizado comparável aos quatro indicadores do Focus: Meta Selic (432,
+9.747 linhas, 144,1s — duas janelas bateram no timeout mesmo em 30s antes de
+uma terceira tentativa passar em 0,3s), IPCA (433, 319 linhas, 1,7s) e PIB
+Total (7326, 26 linhas, 1,0s) — as duas últimas, mensal e anual, muito mais
+rápidas que as diárias por terem uma ordem de magnitude menos linhas por
+janela.
+
+`dbt build` (2 seeds, 1 snapshot, 4 tabelas, 4 views, 58 testes genéricos +
+3 singulares = 69 no total): completa em ~1,7s, 69/69 passam. Contagem final
+por tabela: `raw.sgs_observacao` 33.948 linhas (6 séries), `raw.focus_expectativa`
+166.079 linhas (4 indicadores), `fct_serie_observada` 33.948 linhas (mesmo
+total do raw, sem revisão pendente fechando nenhuma versão),
+`fct_expectativa` 129.775 linhas (só `baseCalculo=0`), `fct_erro_projecao`
+116.422 linhas (só anos completos: exclui 2026 do IPCA, que só tem 7 dos 12
+meses do ano carregados), `mart_convergencia_focus` 20 linhas (4 indicadores
+× 5 faixas de horizonte).
+
 ## Como rodar
 
 ```bash
@@ -384,6 +510,15 @@ uv run python -m bcb_ingest.cli carregar --serie 1
 # incremental a partir da última coleta conhecida, sem argumento de data)
 uv run python -m bcb_ingest.cli carregar-focus --indicador IPCA
 # equivalente: make ingest-focus INDICADOR=IPCA
+
+# transformação: seeds + snapshot + staging + intermediate + marts + testes
+uv run dbt build --project-dir dbt --profiles-dir dbt
+# equivalente: make dbt
+
+# lineage e documentação navegável no navegador
+uv run dbt docs generate --project-dir dbt --profiles-dir dbt
+uv run dbt docs serve --project-dir dbt --profiles-dir dbt
+# equivalente: make dbt-docs
 ```
 
 Em ambientes sem GNU Make, use os comandos `uv run ...` equivalentes listados

@@ -1,0 +1,72 @@
+version: 2
+
+models:
+  - name: fct_serie_observada
+    description: Grão série x data - versão vigente de cada observação do SGS, vinda do snapshot.
+    columns:
+      - name: codigo_serie
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_serie')
+                field: codigo_serie
+      - name: data_observacao
+        tests: [not_null]
+      - name: valor
+        tests: [not_null]
+      - name: chave_natural
+        tests: [not_null, unique]
+
+  - name: fct_expectativa
+    description: Grão indicador x data de coleta x data de referência - expectativas do Focus (base de cálculo 0).
+    columns:
+      - name: indicador
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["IPCA", "Selic", "Câmbio", "PIB Total"]
+          - relationships:
+              arguments:
+                to: ref('de_para_indicador')
+                field: indicador_focus
+      - name: ano_referencia
+        tests: [not_null]
+      - name: data_coleta
+        tests: [not_null]
+      - name: chave_natural
+        tests: [not_null, unique]
+
+  - name: fct_erro_projecao
+    description: Cruza expectativa do Focus com o realizado anual do SGS - erro, erro absoluto e viés, só onde o realizado existe.
+    columns:
+      - name: indicador
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["IPCA", "Selic", "Câmbio", "PIB Total"]
+      - name: realizado
+        tests: [not_null]
+      - name: erro
+        tests: [not_null]
+      - name: erro_absoluto
+        tests: [not_null]
+      - name: vies
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["subestimou", "superestimou", "acertou"]
+      - name: chave_natural
+        tests: [not_null, unique]
+
+  - name: mart_convergencia_focus
+    description: Erro absoluto mediano por indicador e faixa de horizonte de projeção.
+    columns:
+      - name: indicador
+        tests: [not_null]
+      - name: faixa_horizonte
+        tests: [not_null]
+      - name: erro_absoluto_mediano
+        tests: [not_null]

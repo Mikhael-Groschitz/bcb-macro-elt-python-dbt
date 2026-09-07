@@ -1,0 +1,7 @@
+codigo_serie,nome,unidade,periodicidade
+1,Dólar americano (venda),R$,diária
+11,Taxa de juros - Selic,% a.d.,diária
+12,Taxa de juros - CDI,% a.d.,diária
+432,Taxa de juros - Meta Selic definida pelo Copom,% a.a.,diária
+433,IPCA - variação mensal,%,mensal
+7326,PIB - taxa de variação real no ano,% a.a.,anual

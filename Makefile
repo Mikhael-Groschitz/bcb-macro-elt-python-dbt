@@ -1,8 +1,8 @@
-.PHONY: setup test lint typecheck validar ingest ingest-focus dbt
+.PHONY: setup test lint typecheck validar ingest ingest-focus dbt dbt-docs
 
 setup:
 	python3 -m pip show uv > /dev/null 2>&1 || python3 -m pip install uv
-	python3 -m uv sync --extra dev
+	python3 -m uv sync --extra dev --extra dbt
 
 test:
 	python3 -m uv run pytest
@@ -26,4 +26,8 @@ ingest-focus:
 	python3 -m uv run python -m bcb_ingest.cli carregar-focus --indicador "$(INDICADOR)"
 
 dbt:
-	@echo "Fase 4 ainda não implementada: projeto dbt."
+	python3 -m uv run dbt build --project-dir dbt --profiles-dir dbt
+
+dbt-docs:
+	python3 -m uv run dbt docs generate --project-dir dbt --profiles-dir dbt
+	python3 -m uv run dbt docs serve --project-dir dbt --profiles-dir dbt

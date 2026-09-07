@@ -1,0 +1,24 @@
+version: 2
+
+models:
+  - name: int_focus_horizonte
+    description: Expectativas do Focus com o horizonte de projeção (dias entre a data de coleta e 31/12 do ano de referência) calculado.
+    columns:
+      - name: indicador
+        tests: [not_null]
+      - name: horizonte_dias
+        tests: [not_null]
+
+  - name: int_sgs_realizado_anual
+    description: >
+      Normaliza cada série SGS mapeada no de_para para um valor anual comparável
+      ao Focus - IPCA acumula os 12 meses via juros compostos, Câmbio e Meta
+      Selic usam a última observação do ano, PIB já é anual. `ano_completo`
+      marca se o ano tem dado suficiente para ser considerado realizado.
+    columns:
+      - name: indicador_focus
+        tests: [not_null]
+      - name: ano
+        tests: [not_null]
+      - name: valor_realizado
+        tests: [not_null]
