@@ -6,6 +6,7 @@ import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import quote, urlencode
 
 import httpx
 import structlog
@@ -114,6 +115,8 @@ class ClienteBCB:
         etag_anterior: str | None = None,
     ) -> httpx.Response:
         headers = {"If-None-Match": etag_anterior} if etag_anterior else None
+        if params:
+            caminho = f"{caminho}?{urlencode(params, quote_via=quote)}"
         ultimo_status: int | None = None
         ultimo_erro: Exception | None = None
 
@@ -121,7 +124,7 @@ class ClienteBCB:
             inicio = time.monotonic()
             retry_after: str | None = None
             try:
-                resposta = self._http.request(metodo, caminho, params=params, headers=headers)
+                resposta = self._http.request(metodo, caminho, headers=headers)
             except (httpx.TimeoutException, httpx.TransportError) as erro:
                 duracao = time.monotonic() - inicio
                 logger.warning(

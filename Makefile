@@ -1,4 +1,4 @@
-.PHONY: setup test lint typecheck validar ingest dbt
+.PHONY: setup test lint typecheck validar ingest ingest-focus dbt
 
 setup:
 	python3 -m pip show uv > /dev/null 2>&1 || python3 -m pip install uv
@@ -20,6 +20,10 @@ validar: lint typecheck test
 ingest:
 	@test -n "$(SERIE)" || (echo "uso: make ingest SERIE=<codigo> [DESDE=aaaa-mm-dd]" && exit 1)
 	python3 -m uv run python -m bcb_ingest.cli carregar --serie $(SERIE) $(if $(DESDE),--desde $(DESDE),)
+
+ingest-focus:
+	@test -n "$(INDICADOR)" || (echo "uso: make ingest-focus INDICADOR=<nome>" && exit 1)
+	python3 -m uv run python -m bcb_ingest.cli carregar-focus --indicador "$(INDICADOR)"
 
 dbt:
 	@echo "Fase 4 ainda não implementada: projeto dbt."

@@ -26,8 +26,10 @@ antes de passar para a próxima. Por enquanto:
   série em `_controle.ingestao`, lookback de 90 dias para capturar revisão de
   dados já publicados, landing em JSON e upsert idempotente em
   `raw.sgs_observacao`, 21 testes novos
-- [ ] **Fase 3 — Extração do Focus**: paginação `$top`/`$skip` com `$orderby`
-  determinístico, carga incremental por data de coleta
+- [x] **Fase 3 — Extração do Focus**: paginação `$top`/`$skip` com `$orderby`
+  determinístico sobre `ExpectativasMercadoAnuais`, carga incremental por
+  data de coleta, upsert idempotente em `raw.focus_expectativa`, 14 testes
+  novos
 - [ ] **Fase 4 — dbt**: staging, snapshot SCD2 sobre as revisões do SGS,
   marts de erro de projeção
 - [ ] **Fase 5 — CI e apresentação**: GitHub Actions, CLI completa
@@ -55,8 +57,8 @@ flowchart TD
     style G fill:#d4edda,stroke:#2e7d32
 ```
 
-Hoje a extração do SGS já grava landing e `raw.*` (caixas cinza e amarelas).
-Faltam a extração completa do Focus e todo o dbt (caixas verdes).
+Hoje as extrações do SGS e do Focus já gravam landing e `raw.*` (caixas
+cinza e amarelas). Falta todo o dbt (caixas verdes).
 
 ## Versões fixadas
 
@@ -65,9 +67,9 @@ Faltam a extração completa do Focus e todo o dbt (caixas verdes).
 | httpx | `>=0.28,<0.29` | cliente HTTP; API estável de `Client`/`Limits`/`Timeout` |
 | pydantic | `>=2.13,<3` | v2, `extra="forbid"` e `field_validator` |
 | structlog | `>=26.1,<27` | logging JSON com `contextvars` para bind de contexto entre camadas |
-| pyarrow | `>=25,<26` | reservado para landing em Parquet — ainda não usado |
-| duckdb | `>=1.5,<2` | `raw.sgs_observacao` e `_controle.ingestao` |
-| pytest / respx / ruff / mypy | ver `pyproject.toml` | dev only |
+| pyarrow | `>=25,<26` | monta as tabelas em memória para o bulk insert no DuckDB (ver "Decisões") |
+| duckdb | `>=1.5,<2` | `raw.sgs_observacao`, `raw.focus_expectativa`, `_controle.*` |
+| pytest / respx / ruff / mypy / pyarrow-stubs | ver `pyproject.toml` | dev only |
 
 Sem `pandas` — a ingestão usa `httpx` + `pydantic` + `pyarrow` + `duckdb`.
 
@@ -184,6 +186,48 @@ resposta — o retry cobre isso sem falha visível, mas quase dobra o tempo
 total da carga. Com 30s de timeout, as mesmas janelas respondem de forma
 consistente sem nenhuma retentativa (números em "Números" abaixo).
 
+**Query string sempre montada com `%20`, nunca `+`.** `client.py` monta a
+query manualmente com `urlencode(params, quote_via=quote)` em vez de deixar
+o `httpx` codificar via `params=`. O `httpx` por padrão usa `+` para espaço
+(convenção `application/x-www-form-urlencoded`), e o serviço Olinda não
+decodifica `+` como espaço — um `$filter` com `and`/`eq` normal quebra com
+erro de tipo (`Edm.Boolean`/`Edm.String` incompatíveis) só por causa do `+`.
+Corrigido no cliente genérico, não só no Focus, porque é uma armadilha que
+afetaria qualquer parâmetro futuro com espaço, em qualquer chamador.
+
+**Bulk insert via pyarrow, não `executemany`.** A primeira versão do upsert
+usava `con.executemany(...)` linha a linha; para uma página de 1000
+observações do Focus isso levava ~17s — mesmo com a conexão em memória, sem
+nenhuma rede envolvida. Um único `INSERT` com 1000 tuplas de `VALUES` inline
+melhora para ~8,7s, ainda inaceitável. Registrando os dados como uma tabela
+pyarrow (`con.register(...)`) e fazendo `INSERT ... SELECT ... FROM
+tabela_registrada ON CONFLICT DO UPDATE`, a mesma página cai para ~0,06s —
+quase 300x mais rápido. DuckDB é um banco colunar; um `INSERT` linha a linha
+ou uma `VALUES` gigante inline não usa o caminho vetorizado de carga, que só
+é acionado ao inserir a partir de um objeto colunar já registrado. Essa
+mesma função é usada tanto pelo SGS quanto pelo Focus.
+
+**`ExpectativasMercadoAnuais` é o único recurso do Focus implementado.** Os
+quatro indicadores exigidos (IPCA, Selic, Câmbio, PIB) têm entrada nesse
+recurso — inclusive "Selic", que é uma expectativa anual distinta da
+expectativa por reunião do Copom (`ExpectativasMercadoSelic`, ainda não
+implementado). `ExpectativaMercadoMensais` e as variantes `Top5` também
+ficam fora do escopo por ora.
+
+**Chave natural inclui `baseCalculo`.** Uma mesma combinação de indicador,
+data de coleta e data de referência aparece duas vezes no Focus — uma linha
+por metodologia de cálculo (`baseCalculo` 0 e 1). Sem essa coluna na chave
+primária de `raw.focus_expectativa`, a segunda linha sobrescreveria a
+primeira no upsert, perdendo metade do dado. `IndicadorDetalhe` também entra
+na chave (coalescido para string vazia, já que é nulo para os quatro
+indicadores usados e `PRIMARY KEY` não aceita `NULL`).
+
+**Paginação sempre continua até uma página vazia, mesmo após uma parcial.**
+Uma página com menos itens que `$top` não é tratada como sinal de fim — só
+uma página com zero itens encerra o laço. É mais uma requisição no pior
+caso, mas remove qualquer suposição sobre o servidor sempre preencher a
+página até o limite antes da última.
+
 ## Peculiaridades das APIs do BCB
 
 - **O erro de janela grande do SGS é HTTP 406, não 400/422**, e o corpo é um
@@ -206,7 +250,21 @@ consistente sem nenhuma retentativa (números em "Números" abaixo).
   O tempo de resposta varia de ~5s a ~21s dependendo da janela, mesmo para
   payloads pequenos (menos de 100KB) — a latência parece dominada pelo lado
   do servidor, não pelo tamanho da resposta, então não dá para presumi-la
-  baixa só porque o payload é pequeno.
+  baixa só porque o payload é pequeno. O Focus, em contraste, responde em
+  menos de 0,5s por página de 1000 linhas — a lentidão é específica do SGS,
+  não das APIs do BCB em geral.
+- **O Olinda não decodifica `+` como espaço na query string** (ver
+  "Decisões" acima) — o efeito prático é um erro 400 que não menciona
+  codificação em lugar nenhum, só reclama de tipos incompatíveis.
+- **`Minimo`, `Maximo` e `numeroRespondentes` vêm `null` em dados antigos do
+  Focus** (confirmado desde o ano 2000 em `ExpectativasMercadoAnuais`,
+  `ExpectativasMercadoSelic` e `ExpectativaMercadoMensais`) — o levantamento
+  inicial da Fase 1 só tinha visto dados recentes, sempre completos.
+- **Duas linhas por indicador/data/data-referência**, distinguidas só por
+  `baseCalculo` (0 ou 1) — sem essa coluna, parece dado duplicado.
+- **`/$count` do Olinda devolve 403.** Não dá para saber o total de linhas
+  de um indicador antes de paginar; a única forma de saber que a carga
+  terminou é a página vazia.
 
 ## Persistência
 
@@ -224,34 +282,73 @@ o horizonte (`horizonte_inicio`/`horizonte_fim`) e a contagem de linhas da
 última execução — é o que decide, na próxima carga, se busca desde `--desde`
 (sem watermark ainda) ou desde `data_ultima_observacao - lookback_dias`.
 
+**Landing do Focus**: `landing/focus/indicador={nome}/pagina={skip}_{top}.json`
+— uma página por arquivo, nomeada pelos dois parâmetros que a definem.
+
+**`raw.focus_expectativa`**: `indicador`, `indicador_detalhe`,
+`data_referencia` (VARCHAR — formato varia por periodicidade, normalização
+fica pra Fase 4), `data_coleta` (DATE), `base_calculo`, `media`/`mediana`/
+`desvio_padrao` (DOUBLE — mesma razão da Fase 1: já chegam como número JSON,
+não string), `minimo`/`maximo`/`numero_respondentes` (nulos em dados
+antigos), `_carregado_em`, `_execucao_id`, `_hash_payload`, com chave
+primária `(indicador, indicador_detalhe, data_referencia, data_coleta,
+base_calculo)`.
+
+**`_controle.ingestao_focus`**: uma linha por indicador, com
+`data_coleta_maxima` e a contagem de linhas da última execução — sem
+horizonte, porque a carga incremental do Focus não tem data final: sempre
+busca "tudo que for mais novo que a última coleta conhecida".
+
 ## Números
 
-47 testes automatizados, execução completa em cerca de 4,8s, sem chamada de
-rede. Cobertura de `bcb_ingest`: 80% no total — `armazenamento.py`, `db.py`
-e `estado.py` em 100%, `janelas.py` 100%, `client.py` 98%, `contratos.py`
-97%, `focus.py` 100%, `sgs.py` 91%; `cli.py` e `logging_config.py` ficam em
-0% porque são validados pelo smoke test manual (`make validar`), não por
-teste de unidade.
+61 testes automatizados, execução completa em cerca de 6,8s, sem chamada de
+rede. Cobertura de `bcb_ingest`: 80% no total — `db.py`, `estado.py` e
+`janelas.py` em 100%, `armazenamento.py` 95%, `client.py` 98%,
+`contratos.py` 97%, `focus.py` 96%, `sgs.py` 91%; `cli.py` e
+`logging_config.py` ficam em 0% porque são validados pelo smoke test manual
+(`make validar`), não por teste de unidade.
 
 O smoke test da CLI (`ultimos --serie 1 --n 5`) contra a API real do SGS
 roda em cerca de 0,9s e devolve o mesmo resultado em execuções consecutivas.
 
-**Carga histórica das três séries diárias**, `--desde 1995-01-01` até hoje
-(2026-09-07), 4 janelas de 10 anos cada:
+**Carga histórica das três séries diárias do SGS**, `--desde 1995-01-01` até
+hoje (2026-09-07), 4 janelas de 10 anos cada:
 
 | Série | Linhas carregadas | Duração |
 |---|---|---|
-| 1 (dólar venda) | 7.952 | 166,0s (timeout de 15s: 1 retentativa) |
-| 11 (Selic) | 7.952 | 168,0s (timeout de 15s: 3 retentativas) |
-| 12 (CDI) | 7.952 | 125,8s (timeout de 30s: 0 retentativas) |
+| 1 (dólar venda) | 7.952 | 60,1s |
+| 11 (Selic) | 7.952 | 59,4s |
+| 12 (CDI) | 7.952 | 59,6s |
 
-`bcb.duckdb`: 4,1MB. `landing/sgs/`: 1,1MB em 12 arquivos JSON (4 janelas ×
-3 séries).
+Nenhuma das três teve retentativa — o tempo é inteiramente latência real do
+SGS para janelas de 10 anos (~19-20s por janela, 4 janelas por série).
 
-**Idempotência**: uma carga incremental imediata da série 1 (sem `--desde`,
-watermark + lookback de 90 dias) busca 65 linhas do período recente em 1,1s;
-a contagem total em `raw.sgs_observacao` para a série 1 permanece em 7.952
-antes e depois, porque o upsert atualiza as linhas existentes em vez de
+**Carga histórica dos quatro indicadores do Focus** (`ExpectativasMercadoAnuais`,
+histórico completo, sem `--desde`):
+
+| Indicador | Linhas carregadas | Páginas | Duração |
+|---|---|---|---|
+| IPCA | 48.352 | 49 | 15,6s |
+| Selic | 39.252 | 40 | 12,3s |
+| Câmbio | 39.075 | 40 | 12,4s |
+| PIB Total | 39.400 | 40 | 13,1s |
+
+Contagem por indicador e ano de referência (amostra 2026-2030, `IPCA`):
+2026 → 2.328 coletas, 2027 → 1.826, 2028 → 1.326, 2029 → 822, 2030 → 320 —
+decrescente porque anos de referência mais distantes entraram no horizonte
+de 5 anos do Focus mais recentemente, então têm menos coletas acumuladas.
+
+`bcb.duckdb`: 19MB. `landing/sgs/`: 1,1MB em 13 arquivos. `landing/focus/`:
+37MB em 173 arquivos (169 páginas de dados + 4 páginas finais vazias).
+`raw.sgs_observacao`: 23.856 linhas. `raw.focus_expectativa`: 166.079 linhas.
+
+**Idempotência**: uma carga incremental imediata da série 1 do SGS (sem
+`--desde`, watermark + lookback de 90 dias) busca 65 linhas do período
+recente em 0,6s; a contagem total em `raw.sgs_observacao` para a série 1
+permanece em 7.952 antes e depois. Uma carga incremental imediata do IPCA
+no Focus não encontra nada mais novo que a última coleta (1 página vazia,
+0,16s) e a contagem em `raw.focus_expectativa` permanece em 48.352 — em
+ambos os casos porque o upsert atualiza linhas existentes em vez de
 duplicá-las.
 
 ## Como rodar
@@ -282,6 +379,11 @@ uv run python -m bcb_ingest.cli carregar --serie 1 --desde 1995-01-01
 # carga incremental (já existe watermark, --desde é ignorado)
 uv run python -m bcb_ingest.cli carregar --serie 1
 # equivalente: make ingest SERIE=1
+
+# carga histórica de um indicador do Focus (primeira e demais vezes: sempre
+# incremental a partir da última coleta conhecida, sem argumento de data)
+uv run python -m bcb_ingest.cli carregar-focus --indicador IPCA
+# equivalente: make ingest-focus INDICADOR=IPCA
 ```
 
 Em ambientes sem GNU Make, use os comandos `uv run ...` equivalentes listados

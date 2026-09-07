@@ -14,6 +14,16 @@ import structlog
 
 from bcb_ingest.client import ClienteBCB, ConfiguracaoCliente, ErroClienteBcb
 from bcb_ingest.db import conectar
+from bcb_ingest.focus import (
+    BASE_URL as FOCUS_BASE_URL,
+)
+from bcb_ingest.focus import (
+    MAX_PAGINAS_PADRAO,
+    TAMANHO_PAGINA_PADRAO,
+    ConfiguracaoCargaFocus,
+    ErroFocus,
+    carregar_historico_indicador,
+)
 from bcb_ingest.logging_config import configurar_logging
 from bcb_ingest.sgs import (
     BASE_URL,
@@ -75,6 +85,37 @@ def construir_parser() -> argparse.ArgumentParser:
     )
     carregar.set_defaults(func=comando_carregar)
 
+    carregar_focus = subparsers.add_parser(
+        "carregar-focus",
+        help="carrega o histórico de um indicador do Focus em raw.focus_expectativa",
+    )
+    carregar_focus.add_argument(
+        "--indicador", required=True, help="nome do indicador no Focus (ex.: IPCA, Selic)"
+    )
+    carregar_focus.add_argument(
+        "--tamanho-pagina",
+        type=int,
+        default=TAMANHO_PAGINA_PADRAO,
+        help=f"linhas por página (padrão {TAMANHO_PAGINA_PADRAO})",
+    )
+    carregar_focus.add_argument(
+        "--max-paginas",
+        type=int,
+        default=MAX_PAGINAS_PADRAO,
+        help=f"teto de páginas por execução (padrão {MAX_PAGINAS_PADRAO})",
+    )
+    carregar_focus.add_argument(
+        "--db",
+        default=os.environ.get("BCB_DUCKDB_PATH", "bcb.duckdb"),
+        help="caminho do arquivo DuckDB (padrão: variável BCB_DUCKDB_PATH ou bcb.duckdb)",
+    )
+    carregar_focus.add_argument(
+        "--landing-dir",
+        default=os.environ.get("BCB_LANDING_DIR", "landing"),
+        help="diretório de landing (padrão: variável BCB_LANDING_DIR ou landing)",
+    )
+    carregar_focus.set_defaults(func=comando_carregar_focus)
+
     return parser
 
 
@@ -121,6 +162,45 @@ def comando_carregar(args: argparse.Namespace) -> int:
                 "data_ultima_observacao": (
                     resultado.data_ultima_observacao.isoformat()
                     if resultado.data_ultima_observacao
+                    else None
+                ),
+            }
+        )
+    )
+    return 0
+
+
+def comando_carregar_focus(args: argparse.Namespace) -> int:
+    config = ConfiguracaoCliente(base_url=FOCUS_BASE_URL)
+    config_carga = ConfiguracaoCargaFocus(
+        tamanho_pagina=args.tamanho_pagina, max_paginas=args.max_paginas
+    )
+    con = conectar(args.db)
+    try:
+        with ClienteBCB(config) as cliente:
+            resultado = carregar_historico_indicador(
+                cliente,
+                con,
+                args.indicador,
+                Path(args.landing_dir),
+                config_carga,
+            )
+    except (ErroClienteBcb, ErroFocus) as erro:
+        logger.error("falha_carga_focus", erro=str(erro))
+        return 1
+    finally:
+        con.close()
+
+    print(
+        json.dumps(
+            {
+                "indicador": resultado.indicador,
+                "linhas_carregadas": resultado.linhas_carregadas,
+                "paginas": resultado.paginas,
+                "duracao_segundos": round(resultado.duracao_segundos, 3),
+                "data_coleta_maxima": (
+                    resultado.data_coleta_maxima.isoformat()
+                    if resultado.data_coleta_maxima
                     else None
                 ),
             }

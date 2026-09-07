@@ -68,9 +68,9 @@ class FocusExpectativaAnual(BaseModel):
     Media: float
     Mediana: float
     DesvioPadrao: float
-    Minimo: float
-    Maximo: float
-    numeroRespondentes: int
+    Minimo: float | None
+    Maximo: float | None
+    numeroRespondentes: int | None
     baseCalculo: int
 
 
@@ -85,9 +85,9 @@ class FocusExpectativaSelic(BaseModel):
     Media: float
     Mediana: float
     DesvioPadrao: float
-    Minimo: float
-    Maximo: float
-    numeroRespondentes: int
+    Minimo: float | None
+    Maximo: float | None
+    numeroRespondentes: int | None
     baseCalculo: int
 
 
@@ -102,7 +102,7 @@ class FocusExpectativaMensal(BaseModel):
     Media: float
     Mediana: float
     DesvioPadrao: float
-    Minimo: float
-    Maximo: float
-    numeroRespondentes: int
+    Minimo: float | None
+    Maximo: float | None
+    numeroRespondentes: int | None
     baseCalculo: int
