@@ -18,7 +18,8 @@ validar: lint typecheck test
 	python3 -m uv run python -m bcb_ingest.cli ultimos --serie 1 --n 5
 
 ingest:
-	@echo "Fase 2 ainda não implementada: extração completa do SGS com janelamento e watermark."
+	@test -n "$(SERIE)" || (echo "uso: make ingest SERIE=<codigo> [DESDE=aaaa-mm-dd]" && exit 1)
+	python3 -m uv run python -m bcb_ingest.cli carregar --serie $(SERIE) $(if $(DESDE),--desde $(DESDE),)
 
 dbt:
 	@echo "Fase 4 ainda não implementada: projeto dbt."

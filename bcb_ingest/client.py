@@ -26,7 +26,7 @@ class ConfiguracaoCliente:
 
     base_url: str
     timeout_conexao: float = 5.0
-    timeout_leitura: float = 15.0
+    timeout_leitura: float = 30.0
     max_tentativas: int = 4
     backoff_base_segundos: float = 0.5
     backoff_teto_segundos: float = 8.0

@@ -22,8 +22,10 @@ antes de passar para a próxima. Por enquanto:
   timeout explícito, contratos Pydantic do SGS e do Focus confirmados por
   chamada real às duas APIs, decodificadores dos dois formatos de erro,
   CLI de smoke test, 26 testes sem rede real
-- [ ] **Fase 2 — Extração do SGS**: janelamento de até 10 anos, watermark por
-  série, lookback para capturar revisão de dados já publicados
+- [x] **Fase 2 — Extração do SGS**: janelamento de até 10 anos, watermark por
+  série em `_controle.ingestao`, lookback de 90 dias para capturar revisão de
+  dados já publicados, landing em JSON e upsert idempotente em
+  `raw.sgs_observacao`, 21 testes novos
 - [ ] **Fase 3 — Extração do Focus**: paginação `$top`/`$skip` com `$orderby`
   determinístico, carga incremental por data de coleta
 - [ ] **Fase 4 — dbt**: staging, snapshot SCD2 sobre as revisões do SGS,
@@ -53,8 +55,8 @@ flowchart TD
     style G fill:#d4edda,stroke:#2e7d32
 ```
 
-Hoje só a chamada às APIs está implementada (caixas cinza). Landing, DuckDB
-e dbt (caixas amarelas e verdes) ainda não existem.
+Hoje a extração do SGS já grava landing e `raw.*` (caixas cinza e amarelas).
+Faltam a extração completa do Focus e todo o dbt (caixas verdes).
 
 ## Versões fixadas
 
@@ -64,7 +66,7 @@ e dbt (caixas amarelas e verdes) ainda não existem.
 | pydantic | `>=2.13,<3` | v2, `extra="forbid"` e `field_validator` |
 | structlog | `>=26.1,<27` | logging JSON com `contextvars` para bind de contexto entre camadas |
 | pyarrow | `>=25,<26` | reservado para landing em Parquet — ainda não usado |
-| duckdb | `>=1.5,<2` | reservado para `raw.*`/dbt — ainda não usado |
+| duckdb | `>=1.5,<2` | `raw.sgs_observacao` e `_controle.ingestao` |
 | pytest / respx / ruff / mypy | ver `pyproject.toml` | dev only |
 
 Sem `pandas` — a ingestão usa `httpx` + `pydantic` + `pyarrow` + `duckdb`.
@@ -148,6 +150,40 @@ para a saída de dados da CLI (uma linha JSON por observação).
 **CLI com `argparse`, não uma dependência externa.** Um único subcomando não
 justifica o peso extra de `click`/`typer`.
 
+**Janelamento de até 10 anos.** `particionar_janelas` divide qualquer
+intervalo em pedaços de no máximo 10 anos, replicando exatamente o limite
+confirmado do SGS (mesma data um ano múltiplo de 10 à frente ainda passa; um
+dia a mais já quebra). Reaproveita o mesmo cálculo tanto na primeira carga
+histórica quanto no lookback incremental, para não ter dois caminhos de código
+fazendo a mesma coisa.
+
+**Lookback de 90 dias em vez de só pegar o que é novo.** Toda carga
+incremental reprocessa os últimos 90 dias, não só a partir da última
+observação. Séries do SGS são revisadas depois de publicadas — um valor de
+uma data passada muda — e é esse reprocessamento que dá ao snapshot dbt da
+Fase 4 alguma coisa para capturar como SCD Tipo 2.
+
+**Idempotência via upsert, não log append-only.** `raw.sgs_observacao` tem
+chave primária `(codigo_serie, data_referencia)` e a carga faz
+`INSERT ... ON CONFLICT DO UPDATE`. Rodar a mesma janela duas vezes não
+duplica linha; se o valor mudou (revisão), a linha existente é atualizada em
+vez de uma nova ser criada. Isso empurra a responsabilidade de guardar
+histórico de revisão para o snapshot dbt (que compara execuções sucessivas),
+em vez de `raw` virar um log crescente que a Fase 4 precisaria deduplicar.
+
+**Hash por observação, não por janela.** `_hash_payload` é o SHA-256 do item
+bruto individual (`{"data": ..., "valor": ...}`), não da resposta inteira da
+janela — cada linha carrega a prova de exatamente qual JSON de origem gerou
+aquele valor, o que importa mais que ter um hash único por arquivo de landing
+(esse já existe como artefato auditável por si só).
+
+**Timeout de leitura de 30s, não 15s.** O valor original da Fase 1 olhava só
+para o endpoint `/ultimos/{n}` (payload minúsculo) e ficou apertado demais
+para janelas históricas de 10 anos, que rotineiramente passam de 15s de
+resposta — o retry cobre isso sem falha visível, mas quase dobra o tempo
+total da carga. Com 30s de timeout, as mesmas janelas respondem de forma
+consistente sem nenhuma retentativa (números em "Números" abaixo).
+
 ## Peculiaridades das APIs do BCB
 
 - **O erro de janela grande do SGS é HTTP 406, não 400/422**, e o corpo é um
@@ -166,19 +202,57 @@ justifica o peso extra de `click`/`typer`.
   devolve 400; a sintaxe correta é `contains(campo, 'valor')` (OData v4).
 - O indicador de PIB no Focus é `"PIB Total"`, não `"PIB"` sozinho — existem
   variantes como `"PIB Agropecuária"`.
+- **Uma janela de 10 anos do SGS pode levar bem mais que alguns segundos.**
+  O tempo de resposta varia de ~5s a ~21s dependendo da janela, mesmo para
+  payloads pequenos (menos de 100KB) — a latência parece dominada pelo lado
+  do servidor, não pelo tamanho da resposta, então não dá para presumi-la
+  baixa só porque o payload é pequeno.
+
+## Persistência
+
+**Landing**: `landing/sgs/serie={codigo}/janela={inicio}_{fim}.json`, com as
+datas da janela em ISO (`aaaa-mm-dd`) — ordena como string e não tem
+ambiguidade de formato, ao contrário do `dd/MM/aaaa` que a API usa na query.
+
+**`raw.sgs_observacao`**: `codigo_serie`, `data_referencia` (DATE),
+`valor` (DECIMAL(18,6) — mesma razão da Fase 1: nunca float para valor de
+série), `_carregado_em`, `_execucao_id`, `_hash_payload`, com chave primária
+`(codigo_serie, data_referencia)`.
+
+**`_controle.ingestao`**: uma linha por série, com `data_ultima_observacao`,
+o horizonte (`horizonte_inicio`/`horizonte_fim`) e a contagem de linhas da
+última execução — é o que decide, na próxima carga, se busca desde `--desde`
+(sem watermark ainda) ou desde `data_ultima_observacao - lookback_dias`.
 
 ## Números
 
-26 testes automatizados, execução completa em cerca de 2,7s, sem chamada de
-rede. Cobertura de `bcb_ingest`: 79% no total — `client.py` 96%,
-`contratos.py` 97%, `focus.py` 100%, `sgs.py` 86%; `cli.py` e
-`logging_config.py` ficam em 0% porque são validados pelo smoke test manual
-(`make validar`), não por teste de unidade.
+47 testes automatizados, execução completa em cerca de 4,8s, sem chamada de
+rede. Cobertura de `bcb_ingest`: 80% no total — `armazenamento.py`, `db.py`
+e `estado.py` em 100%, `janelas.py` 100%, `client.py` 98%, `contratos.py`
+97%, `focus.py` 100%, `sgs.py` 91%; `cli.py` e `logging_config.py` ficam em
+0% porque são validados pelo smoke test manual (`make validar`), não por
+teste de unidade.
 
 O smoke test da CLI (`ultimos --serie 1 --n 5`) contra a API real do SGS
-roda em cerca de 0,9s e devolve o mesmo resultado em execuções consecutivas —
-nada é persistido ainda nesta etapa, então não há efeito colateral a
-verificar.
+roda em cerca de 0,9s e devolve o mesmo resultado em execuções consecutivas.
+
+**Carga histórica das três séries diárias**, `--desde 1995-01-01` até hoje
+(2026-09-07), 4 janelas de 10 anos cada:
+
+| Série | Linhas carregadas | Duração |
+|---|---|---|
+| 1 (dólar venda) | 7.952 | 166,0s (timeout de 15s: 1 retentativa) |
+| 11 (Selic) | 7.952 | 168,0s (timeout de 15s: 3 retentativas) |
+| 12 (CDI) | 7.952 | 125,8s (timeout de 30s: 0 retentativas) |
+
+`bcb.duckdb`: 4,1MB. `landing/sgs/`: 1,1MB em 12 arquivos JSON (4 janelas ×
+3 séries).
+
+**Idempotência**: uma carga incremental imediata da série 1 (sem `--desde`,
+watermark + lookback de 90 dias) busca 65 linhas do período recente em 1,1s;
+a contagem total em `raw.sgs_observacao` para a série 1 permanece em 7.952
+antes e depois, porque o upsert atualiza as linhas existentes em vez de
+duplicá-las.
 
 ## Como rodar
 
@@ -200,6 +274,14 @@ make typecheck    # equivalente: uv run mypy bcb_ingest
 
 # smoke test contra a API real do SGS — imprime 5 observações tipadas
 uv run python -m bcb_ingest.cli ultimos --serie 1 --n 5
+
+# carga histórica de uma série (primeira vez, precisa de --desde)
+uv run python -m bcb_ingest.cli carregar --serie 1 --desde 1995-01-01
+# equivalente: make ingest SERIE=1 DESDE=1995-01-01
+
+# carga incremental (já existe watermark, --desde é ignorado)
+uv run python -m bcb_ingest.cli carregar --serie 1
+# equivalente: make ingest SERIE=1
 ```
 
 Em ambientes sem GNU Make, use os comandos `uv run ...` equivalentes listados
