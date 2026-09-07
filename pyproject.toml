@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bcb-ingest"
+version = "0.1.0"
+description = "Ingestão das APIs do Banco Central (SGS e Focus/Olinda) para um mart analítico de expectativa vs. realizado"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28,<0.29",
+    "pydantic>=2.13,<3",
+    "structlog>=26.1,<27",
+    "pyarrow>=25,<26",
+    "duckdb>=1.5,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1,<10",
+    "pytest-cov>=7.1,<8",
+    "respx>=0.23,<0.24",
+    "ruff>=0.16,<0.17",
+    "mypy>=2.3,<3",
+]
+
+[project.scripts]
+bcb-ingest = "bcb_ingest.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bcb_ingest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "N", "S", "PL"]
+# N818: convenção do projeto é prefixo "Erro" (português), não sufixo "Error".
+ignore = ["N818"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "PLR2004"]
+# N815: campos espelham o casing exato da API do Focus (numeroRespondentes,
+# baseCalculo) de propósito, para não precisar de Field(alias=...) em cada um.
+"bcb_ingest/contratos.py" = ["N815"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
