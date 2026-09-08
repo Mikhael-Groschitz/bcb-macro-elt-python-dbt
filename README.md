@@ -1,5 +1,7 @@
 # Expectativa vs. Realizado — BCB (Python + dbt)
 
+[![CI](https://github.com/Mikhael-Groschitz/bcb-macro-elt-python-dbt/actions/workflows/ci.yml/badge.svg)](https://github.com/Mikhael-Groschitz/bcb-macro-elt-python-dbt/actions/workflows/ci.yml)
+
 O Boletim Focus do Banco Central publica o que o mercado **projeta** para
 IPCA, Selic, câmbio e PIB. O SGS publica o que **de fato aconteceu** com esses
 mesmos indicadores. O produto final deste projeto é o cruzamento dos dois:
@@ -15,8 +17,8 @@ com snapshots (SCD Tipo 2) capturando revisão histórica de série temporal.
 
 ## Status do projeto
 
-Estou construindo isto em cinco fases, validando cada uma de ponta a ponta
-antes de passar para a próxima. Por enquanto:
+Construído em cinco fases, cada uma validada de ponta a ponta antes de passar
+para a próxima:
 
 - [x] **Fase 1 — Pacote e cliente HTTP**: cliente HTTP com retry, backoff e
   timeout explícito, contratos Pydantic do SGS e do Focus confirmados por
@@ -33,12 +35,13 @@ antes de passar para a próxima. Por enquanto:
 - [x] **Fase 4 — dbt**: staging, snapshot SCD2 sobre as revisões do SGS,
   seeds de mapeamento indicador↔série, normalização de unidades, marts de
   erro de projeção, 69 testes dbt (genéricos + 3 singulares)
-- [ ] **Fase 5 — CI e apresentação**: GitHub Actions, CLI completa
-  (`ingest`/`status`/`reset`), README final consolidado
+- [x] **Fase 5 — CI e apresentação**: catálogo único de séries/indicadores
+  confirmados, comandos `ingest`/`status`/`reset` na CLI, GitHub Actions
+  rodando lint/tipagem/testes/`dbt build` a cada push, 4 testes novos
 
-O achado já está abaixo, em "O que os dados mostram" — uma leitura
-consolidada de trade-offs olhando o pipeline inteiro fica para o fechamento
-da Fase 5.
+O achado está abaixo, em "O que os dados mostram"; a leitura consolidada de
+trade-offs olhando o pipeline inteiro fecha o README, em "Lições do pipeline
+inteiro".
 
 ## O que os dados mostram
 
@@ -73,18 +76,18 @@ flowchart TD
     F --> G[marts<br/>fct_erro_projecao]
     G --> H[consultas/<br/>achado final]
 
-    style A fill:#d4edda,stroke:#2e7d32
-    style B fill:#d4edda,stroke:#2e7d32
-    style C fill:#d4edda,stroke:#2e7d32
-    style D fill:#d4edda,stroke:#2e7d32
-    style E fill:#d4edda,stroke:#2e7d32
-    style F fill:#d4edda,stroke:#2e7d32
-    style G fill:#d4edda,stroke:#2e7d32
-    style H fill:#d4edda,stroke:#2e7d32
+    style A fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style B fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style C fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style D fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style E fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style F fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style G fill:#2e7d32,stroke:#1b5e20,color:#ffffff
+    style H fill:#2e7d32,stroke:#1b5e20,color:#ffffff
 ```
 
-O pipeline completo já roda de ponta a ponta, das duas APIs até os marts.
-Falta CI e a apresentação final (Fase 5).
+O pipeline completo roda de ponta a ponta, das duas APIs até os marts, com o
+GitHub Actions validando lint, tipagem, testes e `dbt build` a cada push.
 
 ## Versões fixadas
 
@@ -306,6 +309,30 @@ a ingestão em Python apontam para o mesmo arquivo DuckDB por padrão — não h
 um passo de "exportar" dados de um lado para o outro, `dbt build` lê
 diretamente o que `bcb_ingest` gravou.
 
+**Catálogo (`bcb_ingest/catalogo.py`) como fonte única para `ingest`/
+`status`.** As seis séries SGS e os quatro indicadores Focus já confirmados
+nas Fases 2-3 ficam numa única lista, reaproveitada tanto para carregar o
+catálogo inteiro numa chamada quanto para relatar o watermark de cada item.
+Sem essa lista central, `ingest` e `status` divergiriam com o tempo por
+manutenção manual em dois lugares.
+
+**`reset` apaga só `raw.*`/`_controle.*`, nunca o arquivo `.duckdb` inteiro
+nem as camadas do dbt.** Zerar a camada de ingestão é uma operação da CLI
+Python; recriar `staging`/`snapshots`/`marts` já tem um comando dbt dedicado
+(`dbt build --full-refresh`) — misturar as duas responsabilidades num único
+`reset` faria a CLI decidir por uma ferramenta que não é dela. Por ser
+destrutivo, `reset` exige a flag `--confirmar`; sem ela, só imprime o que
+seria apagado e retorna código de saída 1, sem tocar no banco.
+
+**CI roda `dbt build` contra um DuckDB vazio, recém-bootstrapado — não
+contra dado real.** O objetivo é pegar erro estrutural (SQL que não compila,
+`ref`/`source` errado, `schema.yml` malformado) antes do merge, sem expor o
+pipeline a rede ou rate-limit do BCB a cada push/PR. Com `raw.*` vazio, seeds
+carregam normalmente e todos os testes passam de forma vazia (nenhuma linha
+para violar `unique`/`not_null`/`relationships`) — o que valida a estrutura,
+não os números; a carga e o `dbt build` com dado real continuam sendo um
+passo manual, documentado em "Como rodar".
+
 ## Snapshot (SCD Tipo 2)
 
 Nenhuma revisão real do BCB ocorreu no período de construção deste projeto
@@ -409,12 +436,16 @@ chave natural), `snapshots` (`snp_sgs_observacao` — SCD Tipo 2),
 
 ## Números
 
-61 testes automatizados, execução completa em cerca de 6,8s, sem chamada de
-rede. Cobertura de `bcb_ingest`: 80% no total — `db.py`, `estado.py` e
-`janelas.py` em 100%, `armazenamento.py` 95%, `client.py` 98%,
-`contratos.py` 97%, `focus.py` 96%, `sgs.py` 91%; `cli.py` e
-`logging_config.py` ficam em 0% porque são validados pelo smoke test manual
-(`make validar`), não por teste de unidade.
+65 testes automatizados, execução completa em cerca de 7,0s, sem chamada de
+rede. Cobertura de `bcb_ingest`: 77% no total — `db.py`, `estado.py`,
+`janelas.py` e `catalogo.py` em 100%, `armazenamento.py` 98%, `client.py`
+98%, `contratos.py` 97%, `focus.py` 96%, `orquestracao.py` 95%, `sgs.py`
+93%; `cli.py` e `logging_config.py` ficam em 0% porque são validados pelo
+smoke test manual (`make validar`), não por teste de unidade — `orquestracao.py`
+e `db.py` concentram a lógica nova da Fase 5 (catálogo, orquestração,
+reset), então ficam com teste de unidade; `cli.py` continua só parseando
+argumentos e formatando saída, sem lógica própria que justifique testá-lo
+separado do que ele chama.
 
 O smoke test da CLI (`ultimos --serie 1 --n 5`) contra a API real do SGS
 roda em cerca de 0,9s e devolve o mesmo resultado em execuções consecutivas.
@@ -500,16 +531,29 @@ uv run python -m bcb_ingest.cli ultimos --serie 1 --n 5
 
 # carga histórica de uma série (primeira vez, precisa de --desde)
 uv run python -m bcb_ingest.cli carregar --serie 1 --desde 1995-01-01
-# equivalente: make ingest SERIE=1 DESDE=1995-01-01
+# equivalente: make carregar SERIE=1 DESDE=1995-01-01
 
 # carga incremental (já existe watermark, --desde é ignorado)
 uv run python -m bcb_ingest.cli carregar --serie 1
-# equivalente: make ingest SERIE=1
+# equivalente: make carregar SERIE=1
 
 # carga histórica de um indicador do Focus (primeira e demais vezes: sempre
 # incremental a partir da última coleta conhecida, sem argumento de data)
 uv run python -m bcb_ingest.cli carregar-focus --indicador IPCA
-# equivalente: make ingest-focus INDICADOR=IPCA
+# equivalente: make carregar-focus INDICADOR=IPCA
+
+# carga do catálogo inteiro (6 séries SGS + 4 indicadores Focus) numa chamada
+uv run python -m bcb_ingest.cli ingest
+# equivalente: make ingest
+
+# watermark de cada série/indicador do catálogo, uma linha JSON por item
+uv run python -m bcb_ingest.cli status
+# equivalente: make status
+
+# zera raw.* e _controle.* para recomeçar a ingestão do zero (destrutivo,
+# por isso a exigência de --confirmar)
+uv run python -m bcb_ingest.cli reset --confirmar
+# equivalente: make reset CONFIRMAR=1
 
 # transformação: seeds + snapshot + staging + intermediate + marts + testes
 uv run dbt build --project-dir dbt --profiles-dir dbt
@@ -523,3 +567,51 @@ uv run dbt docs serve --project-dir dbt --profiles-dir dbt
 
 Em ambientes sem GNU Make, use os comandos `uv run ...` equivalentes listados
 acima.
+
+## CI
+
+`.github/workflows/ci.yml` roda em todo push e pull request para `main`,
+chamando os mesmos alvos do Makefile — nenhuma lógica duplicada em YAML:
+
+```bash
+make setup   # uv sync
+make ci      # lint + typecheck + test + bootstrap-db + dbt
+```
+
+`make ci` não chama as APIs reais do BCB: `bootstrap-db` só cria o schema
+vazio (`raw.*`/`_controle.*` sem linhas) antes do `dbt build`, o suficiente
+para pegar erro estrutural de SQL/schema.yml sem depender de rede ou dado
+real em CI (ver "Decisões" acima). A carga real com `ingest`/`carregar`/
+`carregar-focus` continua sendo um passo manual, documentado nesta seção.
+
+## Lições do pipeline inteiro
+
+Fechando as cinco fases, três padrões se repetiram em pontos diferentes do
+pipeline, mais do que qualquer indicador específico:
+
+**O contrato real de uma API diverge da documentação, sempre em algum
+detalhe pequeno o bastante para passar despercebido até a chamada real.** O
+SGS erra janela grande com HTTP 406 (não 400/422) e corpo em formato de
+objeto, não lista. O Olinda embrulha erro em comentário JS, não decodifica
+`+` como espaço na query string, e devolve `null` em campos que a amostra
+inicial da Fase 1 nunca tinha visto nulos. Nenhum desses casos aparece em
+documentação alguma — só apareceram testando contra a API de verdade, o que
+justifica a regra do projeto de nunca chutar código de série ou formato de
+campo.
+
+**Performance em banco colunar não segue a intuição de código orientado a
+linha.** `executemany` linha a linha e um único `INSERT` com milhares de
+`VALUES` inline pareciam as duas opções óbvias — as duas ficaram na casa dos
+segundos para mil linhas, mesmo em memória. Registrar os dados como tabela
+pyarrow e inserir a partir dela é ~300x mais rápido, porque só esse caminho
+aciona o carregamento vetorizado do DuckDB. Sem medir as três abordagens,
+a mais lenta teria virado o padrão do projeto sem ninguém notar.
+
+**Transparência sobre dado sintético vale mais que forçar um achado
+bonito.** Nenhuma revisão real do BCB aconteceu na janela de construção — em
+vez de esperar indefinidamente ou inventar uma revisão sem rotular, o
+snapshot foi validado com uma simulação explicitamente marcada como tal
+(`SIMULACAO_REVISAO_DEMO_SCD2`). O achado central do projeto (erro do Focus
+cai conforme a data de referência se aproxima) é real e teria sido válido de
+qualquer forma; misturar dado sintético não rotulado a essa conclusão
+destruiria a credibilidade de ambos.

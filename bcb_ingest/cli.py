@@ -13,7 +13,7 @@ from pathlib import Path
 import structlog
 
 from bcb_ingest.client import ClienteBCB, ConfiguracaoCliente, ErroClienteBcb
-from bcb_ingest.db import conectar
+from bcb_ingest.db import conectar, resetar_ingestao
 from bcb_ingest.focus import (
     BASE_URL as FOCUS_BASE_URL,
 )
@@ -25,6 +25,7 @@ from bcb_ingest.focus import (
     carregar_historico_indicador,
 )
 from bcb_ingest.logging_config import configurar_logging
+from bcb_ingest.orquestracao import ingerir_tudo, obter_status_geral
 from bcb_ingest.sgs import (
     BASE_URL,
     LOOKBACK_PADRAO_DIAS,
@@ -42,6 +43,22 @@ def _parse_data(valor: str) -> date:
         return datetime.strptime(valor, "%Y-%m-%d").date()
     except ValueError as erro:
         raise argparse.ArgumentTypeError(f"data fora do formato aaaa-mm-dd: {valor!r}") from erro
+
+
+def _adicionar_argumento_db(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--db",
+        default=os.environ.get("BCB_DUCKDB_PATH", "bcb.duckdb"),
+        help="caminho do arquivo DuckDB (padrão: variável BCB_DUCKDB_PATH ou bcb.duckdb)",
+    )
+
+
+def _adicionar_argumento_landing_dir(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--landing-dir",
+        default=os.environ.get("BCB_LANDING_DIR", "landing"),
+        help="diretório de landing (padrão: variável BCB_LANDING_DIR ou landing)",
+    )
 
 
 def construir_parser() -> argparse.ArgumentParser:
@@ -73,16 +90,8 @@ def construir_parser() -> argparse.ArgumentParser:
         default=LOOKBACK_PADRAO_DIAS,
         help=f"dias reprocessados antes da última observação (padrão {LOOKBACK_PADRAO_DIAS})",
     )
-    carregar.add_argument(
-        "--db",
-        default=os.environ.get("BCB_DUCKDB_PATH", "bcb.duckdb"),
-        help="caminho do arquivo DuckDB (padrão: variável BCB_DUCKDB_PATH ou bcb.duckdb)",
-    )
-    carregar.add_argument(
-        "--landing-dir",
-        default=os.environ.get("BCB_LANDING_DIR", "landing"),
-        help="diretório de landing (padrão: variável BCB_LANDING_DIR ou landing)",
-    )
+    _adicionar_argumento_db(carregar)
+    _adicionar_argumento_landing_dir(carregar)
     carregar.set_defaults(func=comando_carregar)
 
     carregar_focus = subparsers.add_parser(
@@ -104,17 +113,33 @@ def construir_parser() -> argparse.ArgumentParser:
         default=MAX_PAGINAS_PADRAO,
         help=f"teto de páginas por execução (padrão {MAX_PAGINAS_PADRAO})",
     )
-    carregar_focus.add_argument(
-        "--db",
-        default=os.environ.get("BCB_DUCKDB_PATH", "bcb.duckdb"),
-        help="caminho do arquivo DuckDB (padrão: variável BCB_DUCKDB_PATH ou bcb.duckdb)",
-    )
-    carregar_focus.add_argument(
-        "--landing-dir",
-        default=os.environ.get("BCB_LANDING_DIR", "landing"),
-        help="diretório de landing (padrão: variável BCB_LANDING_DIR ou landing)",
-    )
+    _adicionar_argumento_db(carregar_focus)
+    _adicionar_argumento_landing_dir(carregar_focus)
     carregar_focus.set_defaults(func=comando_carregar_focus)
+
+    ingest = subparsers.add_parser(
+        "ingest", help="carrega o catálogo inteiro (todas as séries SGS e indicadores Focus)"
+    )
+    _adicionar_argumento_db(ingest)
+    _adicionar_argumento_landing_dir(ingest)
+    ingest.set_defaults(func=comando_ingest)
+
+    status = subparsers.add_parser(
+        "status", help="mostra o watermark de cada série/indicador do catálogo"
+    )
+    _adicionar_argumento_db(status)
+    status.set_defaults(func=comando_status)
+
+    reset = subparsers.add_parser(
+        "reset", help="apaga raw.* e _controle.* para recomeçar a ingestão do zero"
+    )
+    _adicionar_argumento_db(reset)
+    reset.add_argument(
+        "--confirmar",
+        action="store_true",
+        help="confirma a exclusão de raw.sgs_observacao, raw.focus_expectativa e _controle.*",
+    )
+    reset.set_defaults(func=comando_reset)
 
     return parser
 
@@ -206,6 +231,86 @@ def comando_carregar_focus(args: argparse.Namespace) -> int:
             }
         )
     )
+    return 0
+
+
+def comando_ingest(args: argparse.Namespace) -> int:
+    config_sgs = ConfiguracaoCliente(base_url=BASE_URL)
+    config_focus = ConfiguracaoCliente(base_url=FOCUS_BASE_URL)
+    con = conectar(args.db)
+    try:
+        with ClienteBCB(config_sgs) as cliente_sgs, ClienteBCB(config_focus) as cliente_focus:
+            resultado = ingerir_tudo(cliente_sgs, cliente_focus, con, Path(args.landing_dir))
+    finally:
+        con.close()
+
+    for item in resultado.itens:
+        print(
+            json.dumps(
+                {
+                    "tipo": item.tipo,
+                    "identificador": item.identificador,
+                    "sucesso": item.sucesso,
+                    "linhas_carregadas": item.linhas_carregadas,
+                    "erro": item.erro,
+                }
+            )
+        )
+
+    falhas = [item for item in resultado.itens if not item.sucesso]
+    print(
+        json.dumps(
+            {
+                "itens_processados": len(resultado.itens),
+                "falhas": len(falhas),
+                "duracao_segundos": round(resultado.duracao_segundos, 3),
+            }
+        )
+    )
+    return 1 if falhas else 0
+
+
+def comando_status(args: argparse.Namespace) -> int:
+    con = conectar(args.db)
+    try:
+        itens = obter_status_geral(con)
+    finally:
+        con.close()
+
+    for item in itens:
+        print(
+            json.dumps(
+                {
+                    "tipo": item.tipo,
+                    "identificador": item.identificador,
+                    "carregado": item.carregado,
+                    "data_referencia": (
+                        item.data_referencia.isoformat() if item.data_referencia else None
+                    ),
+                    "contagem_linhas": item.contagem_linhas,
+                    "executado_em": (item.executado_em.isoformat() if item.executado_em else None),
+                }
+            )
+        )
+    return 0
+
+
+def comando_reset(args: argparse.Namespace) -> int:
+    if not args.confirmar:
+        print(
+            "reset apagaria raw.sgs_observacao, raw.focus_expectativa, _controle.ingestao "
+            "e _controle.ingestao_focus. Rode de novo com --confirmar para prosseguir.",
+            file=sys.stderr,
+        )
+        return 1
+
+    con = conectar(args.db)
+    try:
+        resetar_ingestao(con)
+    finally:
+        con.close()
+
+    print(json.dumps({"reset": True, "db": args.db}))
     return 0
 
 

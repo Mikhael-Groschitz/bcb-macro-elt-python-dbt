@@ -11,6 +11,14 @@ def conectar(caminho: str) -> duckdb.DuckDBPyConnection:
     return con
 
 
+def resetar_ingestao(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute("DROP TABLE IF EXISTS raw.sgs_observacao")
+    con.execute("DROP TABLE IF EXISTS raw.focus_expectativa")
+    con.execute("DROP TABLE IF EXISTS _controle.ingestao")
+    con.execute("DROP TABLE IF EXISTS _controle.ingestao_focus")
+    _bootstrap(con)
+
+
 def _bootstrap(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("CREATE SCHEMA IF NOT EXISTS raw")
     con.execute("CREATE SCHEMA IF NOT EXISTS _controle")
